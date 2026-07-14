@@ -1,0 +1,57 @@
+#Trex Mini for SIEM
+$ErrorActionPreference=0;$pc=$env:COMPUTERNAME;$rf="C:\$pc Trex Reports";$dt=Get-Date -F 'yyyy-MM-dd HH:mm:ss'
+if(-not([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(544)){exit 1}
+Add-Type -A System.IO.Compression.FileSystem; if(!(Test-Path $rf)){mkdir $rf|out-null}
+
+function G-H($t,$cb){
+$h="<html><style>body{margin:0;font-family:sans-serif;background:#eee} .hb{background:linear-gradient(135deg,#1e3c72 0%,#2a5298 100%);color:#fff;padding:20px;border-bottom:4px solid #b30000;margin-bottom:15px} .hb h2{margin:0 0 5px 0} .c{padding:0 15px 15px 15px} table{width:100%;border-collapse:collapse;background:#fff} th,td{border:1px solid #ccc;padding:8px;font-size:12px;text-align:left} th{background:#1e3c72;color:#fff} pre{background:#fff;border:1px solid #ccc;padding:10px;overflow-x:auto;font-size:11px}</style><body><div class='hb'><h2>TREX REPORT: $t</h2>Target: $pc</div><div class='c'><div>$(&$cb)</div><br><small style='color:#555;font-weight:bold;'>Context: TREX Crowdstrike RTR - Data Pull - $dt</small></div></body></html>"
+$h|Out-File "$rf\$t.html" -Encoding UTF8
+}
+
+G-H "PCInfo" {
+$c=gcim Win32_ComputerSystem;$o=gcim Win32_OperatingSystem
+"<table><tr><th>Host</th><td>$($c.Name)</td></tr><tr><th>OS</th><td>$($o.Caption)</td></tr></table>"
+}
+G-H "Services" { "<pre>$(Get-Service|? Status -eq 'Running'|Out-String)</pre>" }
+G-H "Processes" { "<pre>$(Get-Process|Sort CPU -D|Select -F 50|Out-String)</pre>" }
+G-H "Software" { (gp "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*","HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*"|? DisplayName|select DisplayName,DisplayVersion,Publisher,InstallDate|ConvertTo-Html -Fragment) }
+G-H "Netstat" { "<pre>$(netstat -ano|Out-String)</pre>" }
+G-H "IPConfig" { "<pre>$(ipconfig /all|Out-String)</pre>" }
+G-H "Disk" { "<pre>$(gwmi Win32_LogicalDisk|select DeviceID,Size,FreeSpace|Out-String)</pre>" }
+G-H "Drivers" { "<pre>$(gwmi Win32_SystemDriver|select Name,State,StartMode|Out-String)</pre>" }
+G-H "Startup" { "<pre>$(gcim Win32_StartupCommand|Out-String)</pre>" }
+G-H "Tasks" { (Get-ScheduledTask|%{$i=$_|Get-ScheduledTaskInfo;[pscustomobject]@{Name=$_.TaskName;State=$_.State;Last=$i.LastRunTime;Next=$i.NextRunTime}}|ConvertTo-Html -Fragment) }
+G-H "Shares" { "<h3>Shares</h3>$((Get-SmbShare|ConvertTo-Html -Fragment))<h3>Sessions</h3>$((Get-SmbSession|ConvertTo-Html -Fragment))" }
+G-H "Updates" { "<pre>$(Get-HotFix|Sort InstalledOn -D|Select -F 20|Out-String)</pre>" }
+G-H "EnvVars" { "<pre>$([Environment]::GetEnvironmentVariables('Machine')|Out-String)</pre>" }
+G-H "USB" { $u=@(); gp "HKLM:\SYSTEM\CurrentControlSet\Enum\USBSTOR\*\*"|%{ $u+=[pscustomobject]@{Name=$_.FriendlyName;ID=$_.PSChildName} }; $u|ConvertTo-Html -Fragment }
+G-H "ARP" { "<pre>$(arp -a|Out-String)</pre>" }
+G-H "Route" { "<pre>$(route print|Out-String)</pre>" }
+G-H "DNS" { "<pre>$(Get-DnsClientCache|select Entry,Data|Out-String)</pre>" }
+G-H "Bitlocker" { "<pre>$(Get-BitLockerVolume|select MountPoint,VolumeStatus,EncryptionPercentage|Out-String)</pre>" }
+G-H "Power" { "<pre>$(powercfg /getactivescheme|Out-String)`n$(powercfg /requests|Out-String)</pre>" }
+G-H "Firewall" { "<h3>Defender Exclusions</h3><pre>$(Get-MpPreference|select ExclusionPath,ExclusionExtension,ExclusionProcess|Out-String)</pre><h3>Active Rules</h3>$((Get-NetFirewallRule|? Enabled -eq 'True'|select DisplayName,Direction,Action|ConvertTo-Html -Fragment))" }
+G-H "Network" { (Get-NetAdapter|select Name,Status,MacAddress,InterfaceDescription|ConvertTo-Html -Fragment) }
+G-H "Uptime" { "<pre>$((Get-Date)-(gcim Win32_OperatingSystem).LastBootUpTime|Out-String)</pre>" }
+G-H "Reliability" { (gcim Win32_ReliabilityRecords -EA 0|Select -F 100|select TimeGenerated,SourceName,Message|ConvertTo-Html -Fragment) }
+
+function G-E($n){ G-H "Events_$n" { (Get-EventLog -LogName $n -Newest 1000 -EA 0|select TimeGenerated,EventID,Message|ConvertTo-Html -Fragment) } }
+G-E "Security"; G-E "System"; G-E "Application"
+
+G-H "WifiPass" { $w=@(); netsh wlan show profiles|sls "All User Profile\s*:\s*(.+)"|%{$p=$_.Matches.Groups[1].Value.Trim();$k="N/A";netsh wlan show profile name="$p" key=clear|sls "Key Content\s*:\s*(.+)"|%{$k=$_.Matches.Groups[1].Value.Trim()};$w+=[pscustomobject]@{SSID=$p;Pass=$k}}; $w|ConvertTo-Html -Fragment }
+G-H "WMIPersistence" { "<pre>$(gcim -Namespace 'root\subscription' -ClassName __FilterToConsumerBinding -EA 0|Out-String)</pre>" }
+G-H "PSHistory" { $h=@(); Get-WinEvent -FilterHashtable @{LogName='Microsoft-Windows-PowerShell/Operational';ID=4104} -Max 1000 -EA 0|%{$h+=[pscustomobject]@{Time=$_.TimeCreated;Cmd=$_.Properties[2].Value}}; $h|ConvertTo-Html -Fragment }
+G-H "JumpLists" { $j=@(); dir C:\Users -Dir|%{ dir "$($_.FullName)\AppData\Roaming\Microsoft\Windows\Recent" -File -EA 0|Sort LastWriteTime -D|Select -F 50|%{$j+=[pscustomobject]@{User=$_.Name;File=$_.Name;Time=$_.LastWriteTime}} }; $j|ConvertTo-Html -Fragment }
+G-H "BAM" { $b=@(); gp "HKLM:\SYSTEM\CurrentControlSet\Services\bam\State\UserSettings\*" -EA 0|%{$sid=$_.PSChildName;$_.psobject.properties|? Name -match '^\\Device\\'|%{$b+=[pscustomobject]@{SID=$sid;Path=$_.Name;Time=[datetime]::FromFileTime([BitConverter]::ToInt64($_.Value,0))}}}; $b|Sort Time -D|ConvertTo-Html -Fragment }
+G-H "Prefetch" { (dir C:\Windows\Prefetch\*.pf -EA 0|Sort LastWriteTime -D|select Name,LastWriteTime,CreationTime|ConvertTo-Html -Fragment) }
+G-H "Profiles" { "<h3>Folders</h3>$((dir C:\Users -Dir|select Name,CreationTime,LastWriteTime|ConvertTo-Html -Fragment))<h3>Accounts</h3>$((Get-LocalUser|select Name,Enabled,LastLogon|ConvertTo-Html -Fragment))" }
+G-H "Downloads" { $d=@(); dir C:\Users -Dir|%{ dir "$($_.FullName)\Downloads" -File -EA 0|%{$d+=[pscustomobject]@{User=$_.Name;File=$_.Name;Size=$_.Length;Time=$_.LastWriteTime}} }; $d|ConvertTo-Html -Fragment }
+G-H "WebExt" { $e=@(); dir C:\Users -Dir|%{ $u=$_.Name; dir "$($_.FullName)\AppData\Local\*\*\User Data\*\Extensions\*\*\manifest.json" -EA 0|%{ $j=gc $_.FullName|ConvertFrom-Json -EA 0; $e+=[pscustomobject]@{User=$u;Ext=$j.name;Ver=$j.version} } }; $e|ConvertTo-Html -Fragment }
+
+$dp="$rf\WebHist"; mkdir $dp|out-null
+dir C:\Users -Dir|%{ $u=$_.Name; dir "$($_.FullName)\AppData\Local\*\*\User Data\*\History" -EA 0|%{ cp $_.FullName "$dp\${u}_$($_.Directory.Parent.Parent.Parent.Name)_$($_.Directory.Name)_History.db" -Force -EA 0 } }
+$df="$rf\EvtLogs"; mkdir $df|out-null; cp "$env:windir\System32\Winevt\Logs\*" $df -Force -EA 0
+
+$zp="C:\$pc`_TREX.zip"; if(Test-Path $zp){rm $zp -Force}
+[System.IO.Compression.ZipFile]::CreateFromDirectory($rf,$zp)
+rm $rf -Recurse -Force
