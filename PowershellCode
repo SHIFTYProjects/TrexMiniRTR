@@ -1,4 +1,4 @@
-#Trex Mini for SIEM
+#Trex Mini -TinyTREX for SIEM
 $ErrorActionPreference=0;$pc=$env:COMPUTERNAME;$rf="C:\$pc Trex Reports";$dt=Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
 if(-not([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(544)){exit 1}
 Add-Type -A System.IO.Compression.FileSystem; if(!(Test-Path $rf)){mkdir $rf|out-null}
