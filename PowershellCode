@@ -1,7 +1,40 @@
 #Trex Mini for SIEM
-$ErrorActionPreference=0;$pc=$env:COMPUTERNAME;$rf="C:\$pc Trex Reports";$dt=Get-Date -F 'yyyy-MM-dd HH:mm:ss'
+$ErrorActionPreference=0;$pc=$env:COMPUTERNAME;$rf="C:\$pc Trex Reports";$dt=Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
 if(-not([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(544)){exit 1}
 Add-Type -A System.IO.Compression.FileSystem; if(!(Test-Path $rf)){mkdir $rf|out-null}
+
+# Centralized Timestamp Formatting Helper
+function Format-DFIRDate($d){
+    if ($null -eq $d -or $d -eq "" -or $d -eq "N/A") { return "N/A" }
+    try {
+        $dtObj = if ($d -is [datetime]) { $d } else { [datetime]::Parse($d.ToString()) }
+        if ($dtObj.Year -lt 2000 -or $dtObj.Year -gt 2035) { return "N/A" }
+        return $dtObj.ToString("yyyy-MM-dd HH:mm:ss")
+    } catch { return "N/A" }
+}
+
+# Centralized Super Timeline Memory Engine with Exact Requested Columns
+$timeline = [System.Collections.Generic.List[PSObject]]::new()
+
+function Add-TL($t, $macb, $a, $u, $d, $mod="N/A", $acc="N/A", $chg="N/A", $birth="N/A", $lastRun="N/A", $nextRun="N/A"){
+    $formattedStr = Format-DFIRDate $t
+    if ($formattedStr -eq "N/A") { return }
+    $cleanDetails = ($d -replace "[\r\n]+"," " -replace '"', '""').Trim()
+    
+    $timeline.Add([pscustomobject]@{
+        "Timestamp"  = $formattedStr
+        "MACB"       = $macb
+        "Modified"   = Format-DFIRDate $mod
+        "Access"     = Format-DFIRDate $acc
+        "Change"     = Format-DFIRDate $chg
+        "Birth"      = Format-DFIRDate $birth
+        "Artifact"   = $a
+        "User"       = if($u){$u}else{"N/A"}
+        "Details"    = $cleanDetails
+        "Last Run"   = Format-DFIRDate $lastRun
+        "Next Run"   = Format-DFIRDate $nextRun
+    })
+}
 
 function G-H($t,$cb){
 $h="<html><style>body{margin:0;font-family:sans-serif;background:#eee} .hb{background:linear-gradient(135deg,#1e3c72 0%,#2a5298 100%);color:#fff;padding:20px;border-bottom:4px solid #b30000;margin-bottom:15px} .hb h2{margin:0 0 5px 0} .c{padding:0 15px 15px 15px} table{width:100%;border-collapse:collapse;background:#fff} th,td{border:1px solid #ccc;padding:8px;font-size:12px;text-align:left} th{background:#1e3c72;color:#fff} pre{background:#fff;border:1px solid #ccc;padding:10px;overflow-x:auto;font-size:11px}</style><body><div class='hb'><h2>TREX REPORT: $t</h2>Target: $pc</div><div class='c'><div>$(&$cb)</div><br><small style='color:#555;font-weight:bold;'>Context: TREX Crowdstrike RTR - Data Pull - $dt</small></div></body></html>"
@@ -20,9 +53,39 @@ G-H "IPConfig" { "<pre>$(ipconfig /all|Out-String)</pre>" }
 G-H "Disk" { "<pre>$(gwmi Win32_LogicalDisk|select DeviceID,Size,FreeSpace|Out-String)</pre>" }
 G-H "Drivers" { "<pre>$(gwmi Win32_SystemDriver|select Name,State,StartMode|Out-String)</pre>" }
 G-H "Startup" { "<pre>$(gcim Win32_StartupCommand|Out-String)</pre>" }
-G-H "Tasks" { (Get-ScheduledTask|%{$i=$_|Get-ScheduledTaskInfo;[pscustomobject]@{Name=$_.TaskName;State=$_.State;Last=$i.LastRunTime;Next=$i.NextRunTime}}|ConvertTo-Html -Fragment) }
+
+# Task Scheduler - Independent Last Run / Next Run Dates
+G-H "Tasks" { 
+    $t = Get-ScheduledTask | % {
+        $i = $_ | Get-ScheduledTaskInfo -EA 0
+        $lastRun = Format-DFIRDate $i.LastRunTime
+        $nextRun = Format-DFIRDate $i.NextRunTime
+        
+        if($lastRun -ne "N/A"){ 
+            Add-TL -t $lastRun -macb "M..." -a "ScheduledTask" -u "SYSTEM" -d "$($_.TaskName) (State: $($_.State))" -mod $lastRun -lastRun $lastRun -nextRun $nextRun 
+        }
+        
+        [pscustomobject]@{
+            TaskName    = $_.TaskName
+            State       = $_.State
+            LastRunTime = $lastRun
+            NextRunTime = $nextRun
+            TaskPath    = $_.TaskPath
+        }
+    }
+    $t | ConvertTo-Html -Fragment 
+}
+
 G-H "Shares" { "<h3>Shares</h3>$((Get-SmbShare|ConvertTo-Html -Fragment))<h3>Sessions</h3>$((Get-SmbSession|ConvertTo-Html -Fragment))" }
-G-H "Updates" { "<pre>$(Get-HotFix|Sort InstalledOn -D|Select -F 20|Out-String)</pre>" }
+G-H "Updates" { 
+    $u = Get-HotFix | Sort InstalledOn -D | Select -F 20
+    $res = $u | % {
+        $inst = Format-DFIRDate $_.InstalledOn
+        if($inst -ne "N/A"){ Add-TL -t $inst -macb "...B" -a "WindowsUpdate" -u "SYSTEM" -d "KB: $($_.HotFixID) - $($_.Description)" -birth $inst }
+        [pscustomobject]@{ HotFixID=$_.HotFixID; Description=$_.Description; InstalledOn=$inst; InstalledBy=$_.InstalledBy }
+    }
+    $res | ConvertTo-Html -Fragment 
+}
 G-H "EnvVars" { "<pre>$([Environment]::GetEnvironmentVariables('Machine')|Out-String)</pre>" }
 G-H "USB" { $u=@(); gp "HKLM:\SYSTEM\CurrentControlSet\Enum\USBSTOR\*\*"|%{ $u+=[pscustomobject]@{Name=$_.FriendlyName;ID=$_.PSChildName} }; $u|ConvertTo-Html -Fragment }
 G-H "ARP" { "<pre>$(arp -a|Out-String)</pre>" }
@@ -33,25 +96,152 @@ G-H "Power" { "<pre>$(powercfg /getactivescheme|Out-String)`n$(powercfg /request
 G-H "Firewall" { "<h3>Defender Exclusions</h3><pre>$(Get-MpPreference|select ExclusionPath,ExclusionExtension,ExclusionProcess|Out-String)</pre><h3>Active Rules</h3>$((Get-NetFirewallRule|? Enabled -eq 'True'|select DisplayName,Direction,Action|ConvertTo-Html -Fragment))" }
 G-H "Network" { (Get-NetAdapter|select Name,Status,MacAddress,InterfaceDescription|ConvertTo-Html -Fragment) }
 G-H "Uptime" { "<pre>$((Get-Date)-(gcim Win32_OperatingSystem).LastBootUpTime|Out-String)</pre>" }
-G-H "Reliability" { (gcim Win32_ReliabilityRecords -EA 0|Select -F 100|select TimeGenerated,SourceName,Message|ConvertTo-Html -Fragment) }
+G-H "Reliability" { 
+    $r = gcim Win32_ReliabilityRecords -EA 0 | Select -F 100
+    $res = $r | % {
+        $tGen = Format-DFIRDate $_.TimeGenerated
+        if($tGen -ne "N/A"){ Add-TL -t $tGen -macb "M..." -a "ReliabilityRecord" -u "SYSTEM" -d "$($_.SourceName): $($_.Message)" -mod $tGen }
+        [pscustomobject]@{ TimeGenerated=$tGen; SourceName=$_.SourceName; Message=$_.Message }
+    }
+    $res | ConvertTo-Html -Fragment 
+}
+G-H "HostsFile" { "<pre>$(Get-Content C:\Windows\System32\drivers\etc\hosts -EA 0|Out-String)</pre>" }
+G-H "RunKeys" { 
+    $r = @(Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run' -EA 0)
+    $r += Get-ChildItem Registry::HKEY_USERS -EA 0 | ? {$_.PSChildName -notmatch '_Classes$|^S-1-5-18$|^S-1-5-19$|^S-1-5-20$'} | % { Get-ItemProperty "Registry::HKEY_USERS\$($_.PSChildName)\SOFTWARE\Microsoft\Windows\CurrentVersion\Run" -EA 0 }
+    "<pre>$($r | Out-String)</pre>" 
+}
+G-H "PSConsoleHist" { 
+    $p=@(); dir C:\Users -Dir|%{ $uName=$_.Name; dir "$($_.FullName)\AppData\Roaming\Microsoft\Windows\PowerShell\PSReadLine\ConsoleHost_history.txt" -EA 0|%{ 
+        $mod = Format-DFIRDate $_.LastWriteTime
+        Add-TL -t $mod -macb "M..." -a "PSConsoleHist" -u $uName -d "PSReadLine History Modified" -mod $mod
+        $p+=gc $_.FullName 
+    } }; "<pre>$($p -join "`n")</pre>" 
+}
+G-H "TypedPaths" { 
+    $t = Get-ChildItem Registry::HKEY_USERS -EA 0 | ? {$_.PSChildName -notmatch '_Classes$|^S-1-5-18$|^S-1-5-19$|^S-1-5-20$'} | % { Get-ItemProperty "Registry::HKEY_USERS\$($_.PSChildName)\Software\Microsoft\Windows\CurrentVersion\Explorer\TypedPaths" -EA 0 }
+    "<pre>$($t | Out-String)</pre>" 
+}
 
-function G-E($n){ G-H "Events_$n" { (Get-EventLog -LogName $n -Newest 1000 -EA 0|select TimeGenerated,EventID,Message|ConvertTo-Html -Fragment) } }
+function G-E($n){ 
+    G-H "Events_$n" { 
+        $ev = Get-EventLog -LogName $n -Newest 1000 -EA 0
+        $res = $ev | % {
+            $tGen = Format-DFIRDate $_.TimeGenerated
+            Add-TL -t $tGen -macb "M..." -a "EventLog-$n" -u "N/A" -d "ID: $($_.EventID) | $($_.Message)" -mod $tGen
+            [pscustomobject]@{ TimeGenerated=$tGen; EventID=$_.EventID; Message=$_.Message }
+        }
+        $res | ConvertTo-Html -Fragment 
+    } 
+}
 G-E "Security"; G-E "System"; G-E "Application"
 
 G-H "WifiPass" { $w=@(); netsh wlan show profiles|sls "All User Profile\s*:\s*(.+)"|%{$p=$_.Matches.Groups[1].Value.Trim();$k="N/A";netsh wlan show profile name="$p" key=clear|sls "Key Content\s*:\s*(.+)"|%{$k=$_.Matches.Groups[1].Value.Trim()};$w+=[pscustomobject]@{SSID=$p;Pass=$k}}; $w|ConvertTo-Html -Fragment }
 G-H "WMIPersistence" { "<pre>$(gcim -Namespace 'root\subscription' -ClassName __FilterToConsumerBinding -EA 0|Out-String)</pre>" }
-G-H "PSHistory" { $h=@(); Get-WinEvent -FilterHashtable @{LogName='Microsoft-Windows-PowerShell/Operational';ID=4104} -Max 1000 -EA 0|%{$h+=[pscustomobject]@{Time=$_.TimeCreated;Cmd=$_.Properties[2].Value}}; $h|ConvertTo-Html -Fragment }
-G-H "JumpLists" { $j=@(); dir C:\Users -Dir|%{ dir "$($_.FullName)\AppData\Roaming\Microsoft\Windows\Recent" -File -EA 0|Sort LastWriteTime -D|Select -F 50|%{$j+=[pscustomobject]@{User=$_.Name;File=$_.Name;Time=$_.LastWriteTime}} }; $j|ConvertTo-Html -Fragment }
-G-H "BAM" { $b=@(); gp "HKLM:\SYSTEM\CurrentControlSet\Services\bam\State\UserSettings\*" -EA 0|%{$sid=$_.PSChildName;$_.psobject.properties|? Name -match '^\\Device\\'|%{$b+=[pscustomobject]@{SID=$sid;Path=$_.Name;Time=[datetime]::FromFileTime([BitConverter]::ToInt64($_.Value,0))}}}; $b|Sort Time -D|ConvertTo-Html -Fragment }
-G-H "Prefetch" { (dir C:\Windows\Prefetch\*.pf -EA 0|Sort LastWriteTime -D|select Name,LastWriteTime,CreationTime|ConvertTo-Html -Fragment) }
-G-H "Profiles" { "<h3>Folders</h3>$((dir C:\Users -Dir|select Name,CreationTime,LastWriteTime|ConvertTo-Html -Fragment))<h3>Accounts</h3>$((Get-LocalUser|select Name,Enabled,LastLogon|ConvertTo-Html -Fragment))" }
-G-H "Downloads" { $d=@(); dir C:\Users -Dir|%{ dir "$($_.FullName)\Downloads" -File -EA 0|%{$d+=[pscustomobject]@{User=$_.Name;File=$_.Name;Size=$_.Length;Time=$_.LastWriteTime}} }; $d|ConvertTo-Html -Fragment }
+G-H "PSHistory" { 
+    $h=@(); Get-WinEvent -FilterHashtable @{LogName='Microsoft-Windows-PowerShell/Operational';ID=4104} -Max 1000 -EA 0|%{ 
+        $tCreated = Format-DFIRDate $_.TimeCreated
+        Add-TL -t $tCreated -macb "M..." -a "PS-ScriptBlock-4104" -u "N/A" -d $_.Properties[2].Value -mod $tCreated
+        $h += [pscustomobject]@{Time=$tCreated; Cmd=$_.Properties[2].Value}
+    }; $h | ConvertTo-Html -Fragment 
+}
+G-H "JumpLists" { 
+    $j=@(); dir C:\Users -Dir|%{ $uName=$_.Name; dir "$($_.FullName)\AppData\Roaming\Microsoft\Windows\Recent" -File -EA 0|Sort LastWriteTime -D|Select -F 50|%{ 
+        $mod = Format-DFIRDate $_.LastWriteTime
+        Add-TL -t $mod -macb ".A.." -a "JumpList" -u $uName -d $_.Name -acc $mod
+        $j += [pscustomobject]@{ User=$uName; File=$_.Name; AccessTime=$mod }
+    } }; $j | ConvertTo-Html -Fragment 
+}
+G-H "BAM" { 
+    $b=@(); gp "HKLM:\SYSTEM\CurrentControlSet\Services\bam\State\UserSettings\*" -EA 0|%{ $sid=$_.PSChildName; $_.psobject.properties|? Name -match '^\\Device\\'|%{ 
+        $tVal = Format-DFIRDate ([datetime]::FromFileTime([BitConverter]::ToInt64($_.Value,0)))
+        Add-TL -t $tVal -macb "M..." -a "BAM Execution" -u $sid -d $_.Name -mod $tVal -lastRun $tVal
+        $b += [pscustomobject]@{ SID=$sid; Path=$_.Name; ExecutionTime=$tVal }
+    }}; $b | Sort ExecutionTime -D | ConvertTo-Html -Fragment 
+}
+
+# Prefetch - Correlated File Timestamps
+G-H "Prefetch" { 
+    $pf = dir C:\Windows\Prefetch\*.pf -EA 0|Sort LastWriteTime -D
+    $res = $pf | % { 
+        $created  = Format-DFIRDate $_.CreationTime
+        $modified = Format-DFIRDate $_.LastWriteTime
+        
+        if($modified -ne "N/A"){ Add-TL -t $modified -macb "M..." -a "Prefetch-Modified" -u "SYSTEM" -d $_.Name -mod $modified -birth $created }
+        if($created -ne "N/A"){ Add-TL -t $created -macb "...B" -a "Prefetch-Created" -u "SYSTEM" -d $_.Name -birth $created -mod $modified }
+        
+        [pscustomobject]@{ PrefetchFile=$_.Name; CreatedTime=$created; ModifiedTime=$modified }
+    }
+    $res | ConvertTo-Html -Fragment 
+}
+
+# User Profiles - Correlated Folder & Account Timestamps
+G-H "Profiles" { 
+    $fDirs = dir C:\Users -Dir | % {
+        $created  = Format-DFIRDate $_.CreationTime
+        $modified = Format-DFIRDate $_.LastWriteTime
+        
+        if($created -ne "N/A"){ Add-TL -t $created -macb "...B" -a "UserProfile-Created" -u $_.Name -d "User profile folder created" -birth $created -mod $modified }
+        if($modified -ne "N/A"){ Add-TL -t $modified -macb "M..." -a "UserProfile-Modified" -u $_.Name -d "User profile folder modified" -mod $modified -birth $created }
+        
+        [pscustomobject]@{ Name=$_.Name; CreatedTime=$created; ModifiedTime=$modified }
+    }
+    
+    $lAccts = Get-LocalUser | % {
+        $lastLogon = Format-DFIRDate $_.LastLogon
+        if($lastLogon -ne "N/A"){ Add-TL -t $lastLogon -macb ".A.." -a "LocalAccount-Logon" -u $_.Name -d "Last interactive logon timestamp" -acc $lastLogon }
+        [pscustomobject]@{ Name=$_.Name; Enabled=$_.Enabled; LastLogon=$lastLogon }
+    }
+    "<h3>Folders</h3>$($fDirs|ConvertTo-Html -Fragment)<h3>Accounts</h3>$($lAccts|ConvertTo-Html -Fragment)" 
+}
+
+# Downloads - Full Side-by-Side MACB File Timestamps
+G-H "Downloads" { 
+    $d=@()
+    dir C:\Users -Dir | % { 
+        $uName=$_.Name
+        dir "$($_.FullName)\Downloads" -File -EA 0 | % { 
+            $created  = Format-DFIRDate $_.CreationTime
+            $modified = Format-DFIRDate $_.LastWriteTime
+            $accessed = Format-DFIRDate $_.LastAccessTime
+            $desc = "$($_.Name) ($([math]::Round($_.Length/1KB,2)) KB)"
+            
+            if($created -ne "N/A"){ Add-TL -t $created -macb "...B" -a "Download-Created" -u $uName -d $desc -birth $created -mod $modified -acc $accessed }
+            if($modified -ne "N/A"){ Add-TL -t $modified -macb "M..." -a "Download-Modified" -u $uName -d $desc -mod $modified -birth $created -acc $accessed }
+            
+            $d += [pscustomobject]@{
+                User         = $uName
+                FileName     = $_.Name
+                SizeBytes    = $_.Length
+                CreatedTime  = $created
+                ModifiedTime = $modified
+                AccessedTime = $accessed
+            }
+        }
+    }
+    $d | ConvertTo-Html -Fragment 
+}
+
 G-H "WebExt" { $e=@(); dir C:\Users -Dir|%{ $u=$_.Name; dir "$($_.FullName)\AppData\Local\*\*\User Data\*\Extensions\*\*\manifest.json" -EA 0|%{ $j=gc $_.FullName|ConvertFrom-Json -EA 0; $e+=[pscustomobject]@{User=$u;Ext=$j.name;Ver=$j.version} } }; $e|ConvertTo-Html -Fragment }
 
+# Browser Artifact Extraction
 $dp="$rf\WebHist"; mkdir $dp|out-null
-dir C:\Users -Dir|%{ $u=$_.Name; dir "$($_.FullName)\AppData\Local\*\*\User Data\*\History" -EA 0|%{ cp $_.FullName "$dp\${u}_$($_.Directory.Parent.Parent.Parent.Name)_$($_.Directory.Name)_History.db" -Force -EA 0 } }
-$df="$rf\EvtLogs"; mkdir $df|out-null; cp "$env:windir\System32\Winevt\Logs\*" $df -Force -EA 0
+dir C:\Users -Dir|%{ $u=$_.Name
+    dir "$($_.FullName)\AppData\Local\*\*\User Data\*\History" -EA 0|%{ cp $_.FullName "$dp\${u}_$($_.Directory.Parent.Parent.Parent.Name)_$($_.Directory.Name)_History.db" -Force -EA 0 }
+    dir "$($_.FullName)\AppData\Local\*\*\User Data\*\Shortcuts" -EA 0|%{ cp $_.FullName "$dp\${u}_$($_.Directory.Parent.Parent.Parent.Name)_$($_.Directory.Name)_Shortcuts.db" -Force -EA 0 }
+    dir "$($_.FullName)\AppData\Local\*\*\User Data\*\Bookmarks" -EA 0|%{ cp $_.FullName "$dp\${u}_$($_.Directory.Parent.Parent.Parent.Name)_$($_.Directory.Name)_Bookmarks" -Force -EA 0 }
+    dir "$($_.FullName)\AppData\Roaming\Mozilla\Firefox\Profiles\*\places.sqlite" -EA 0|%{ cp $_.FullName "$dp\${u}_Firefox_$($_.Directory.Name)_places.sqlite" -Force -EA 0 }
+    dir "$($_.FullName)\AppData\Roaming\Apple Computer\Safari\History.plist" -EA 0|%{ cp $_.FullName "$dp\${u}_Safari_History.plist" -Force -EA 0 }
+}
 
+# Raw Event Log Archiving (*.evtx)
+$df="$rf\EvtLogs"; mkdir $df|out-null
+cp "$env:windir\System32\Winevt\Logs\*" $df -Force -EA 0
+
+# Export Super Timeline CSV with Explicit Column Ordering
+$timeline | Sort-Object Timestamp -Descending | Select-Object "Timestamp", "MACB", "Modified", "Access", "Change", "Birth", "Artifact", "User", "Details", "Last Run", "Next Run" | Export-Csv "$rf\SuperTimeline.csv" -NoTypeInformation -Encoding UTF8
+
+# Compress and Cleanup
 $zp="C:\$pc`_TREX.zip"; if(Test-Path $zp){rm $zp -Force}
 [System.IO.Compression.ZipFile]::CreateFromDirectory($rf,$zp)
 rm $rf -Recurse -Force
