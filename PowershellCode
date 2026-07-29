@@ -225,10 +225,23 @@ G-H "WebExt" { $e=@(); dir C:\Users -Dir|%{ $u=$_.Name; dir "$($_.FullName)\AppD
 # Browser Artifact Extraction
 $dp="$rf\WebHist"; mkdir $dp|out-null
 dir C:\Users -Dir|%{ $u=$_.Name
+    # Chromium Browsers (History, Shortcuts, Bookmarks, Cookies, Login Data, Web Data)
     dir "$($_.FullName)\AppData\Local\*\*\User Data\*\History" -EA 0|%{ cp $_.FullName "$dp\${u}_$($_.Directory.Parent.Parent.Parent.Name)_$($_.Directory.Name)_History.db" -Force -EA 0 }
     dir "$($_.FullName)\AppData\Local\*\*\User Data\*\Shortcuts" -EA 0|%{ cp $_.FullName "$dp\${u}_$($_.Directory.Parent.Parent.Parent.Name)_$($_.Directory.Name)_Shortcuts.db" -Force -EA 0 }
     dir "$($_.FullName)\AppData\Local\*\*\User Data\*\Bookmarks" -EA 0|%{ cp $_.FullName "$dp\${u}_$($_.Directory.Parent.Parent.Parent.Name)_$($_.Directory.Name)_Bookmarks" -Force -EA 0 }
+    dir "$($_.FullName)\AppData\Local\*\*\User Data\*\Cookies" -EA 0|%{ cp $_.FullName "$dp\${u}_$($_.Directory.Parent.Parent.Parent.Name)_$($_.Directory.Name)_Cookies.db" -Force -EA 0 }
+    dir "$($_.FullName)\AppData\Local\*\*\User Data\*\Network\Cookies" -EA 0|%{ cp $_.FullName "$dp\${u}_$($_.Directory.Parent.Parent.Parent.Parent.Name)_$($_.Directory.Parent.Name)_Cookies.db" -Force -EA 0 }
+    dir "$($_.FullName)\AppData\Local\*\*\User Data\*\Login Data" -EA 0|%{ cp $_.FullName "$dp\${u}_$($_.Directory.Parent.Parent.Parent.Name)_$($_.Directory.Name)_LoginData.db" -Force -EA 0 }
+    dir "$($_.FullName)\AppData\Local\*\*\User Data\*\Web Data" -EA 0|%{ cp $_.FullName "$dp\${u}_$($_.Directory.Parent.Parent.Parent.Name)_$($_.Directory.Name)_WebData.db" -Force -EA 0 }
+
+    # Firefox Browsers
     dir "$($_.FullName)\AppData\Roaming\Mozilla\Firefox\Profiles\*\places.sqlite" -EA 0|%{ cp $_.FullName "$dp\${u}_Firefox_$($_.Directory.Name)_places.sqlite" -Force -EA 0 }
+    dir "$($_.FullName)\AppData\Roaming\Mozilla\Firefox\Profiles\*\cookies.sqlite" -EA 0|%{ cp $_.FullName "$dp\${u}_Firefox_$($_.Directory.Name)_cookies.sqlite" -Force -EA 0 }
+    dir "$($_.FullName)\AppData\Roaming\Mozilla\Firefox\Profiles\*\logins.json" -EA 0|%{ cp $_.FullName "$dp\${u}_Firefox_$($_.Directory.Name)_logins.json" -Force -EA 0 }
+    dir "$($_.FullName)\AppData\Roaming\Mozilla\Firefox\Profiles\*\key4.db" -EA 0|%{ cp $_.FullName "$dp\${u}_Firefox_$($_.Directory.Name)_key4.db" -Force -EA 0 }
+    dir "$($_.FullName)\AppData\Roaming\Mozilla\Firefox\Profiles\*\formhistory.sqlite" -EA 0|%{ cp $_.FullName "$dp\${u}_Firefox_$($_.Directory.Name)_formhistory.sqlite" -Force -EA 0 }
+
+    # Safari Browser
     dir "$($_.FullName)\AppData\Roaming\Apple Computer\Safari\History.plist" -EA 0|%{ cp $_.FullName "$dp\${u}_Safari_History.plist" -Force -EA 0 }
 }
 $df="$rf\EvtLogs"; mkdir $df|out-null
