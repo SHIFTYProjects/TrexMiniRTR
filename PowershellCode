@@ -31,14 +31,25 @@ function Add-TL($t, $macb, $a, $u, $d, $mod="N/A", $acc="N/A", $chg="N/A", $birt
     })
 }
 function G-H($t,$cb){
-$h="<html><style>body{margin:0;font-family:sans-serif;background:#eee} .hb{background:linear-gradient(135deg,#1e3c72 0%,#2a5298 100%);color:#fff;padding:20px;border-bottom:4px solid #b30000;margin-bottom:15px} .hb h2{margin:0 0 5px 0} .c{padding:0 15px 15px 15px} table{width:100%;border-collapse:collapse;background:#fff} th,td{border:1px solid #ccc;padding:8px;font-size:12px;text-align:left} th{background:#1e3c72;color:#fff} pre{background:#fff;border:1px solid #ccc;padding:10px;overflow-x:auto;font-size:11px}</style><body><div class='hb'><h2>TREX REPORT: $t</h2>Target: $pc</div><div class='c'><div>$(&$cb)</div><br><small style='color:#555;font-weight:bold;'>Context: TREX Crowdstrike RTR - Data Pull - $dt</small></div></body></html>"
+$h="<html><style>body{margin:0;font-family:sans-serif;background:#eee} .hb{background:linear-gradient(135deg,#1e3c72 0%,#2a5298 100%);color:#fff;padding:20px;border-bottom:4px solid #b30000;margin-bottom:15px} .hb h2{margin:0 0 5px 0} .c{padding:0 15px 15px 15px} table{width:100%;border-collapse:collapse;background:#fff} th,td{border:1px solid #ccc;padding:8px;font-size:12px;text-align:left} th{background:#1e3c72;color:#fff} pre{background:#fff;border:1px solid #ccc;padding:10px;overflow-x:auto;font-size:11px}</style><body><div class='hb'><h2>TREX REPORT: $t</h2>Target: $pc</div><div class='c'><div>$(&$cb)</div><br><small style='color:#555;font-weight:bold;'>Context: REAL TIME RESPONSE - DATA Pull - Author: Josh Hochstettler 2026 - $dt</small></div></body></html>"
 $h|Out-File "$rf\$t.html" -Encoding UTF8
 }
 G-H "PCInfo" {
-$c=gcim Win32_ComputerSystem;$o=gcim Win32_OperatingSystem
-"<table><tr><th>Host</th><td>$($c.Name)</td></tr><tr><th>OS</th><td>$($o.Caption)</td></tr></table>"
-}
-G-H "Services" { "<pre>$(Get-Service|? Status -eq 'Running'|Out-String)</pre>" }
+    $c = gcim Win32_ComputerSystem -EA 0
+    $o = gcim Win32_OperatingSystem -EA 0
+    $p = gcim Win32_Processor -EA 0 | Select-Object -First 1
+    
+    "<table>
+        <tr><th>Host</th><td>$($c.Name)</td></tr>
+        <tr><th>Domain / Workgroup</th><td>$($c.Domain)</td></tr>
+        <tr><th>OS</th><td>$($o.Caption) ($($o.OSArchitecture))</td></tr>
+        <tr><th>Version / Build</th><td>$($o.Version) (Build $($o.BuildNumber))</td></tr>
+        <tr><th>Manufacturer / Model</th><td>$($c.Manufacturer) $($c.Model)</td></tr>
+        <tr><th>CPU</th><td>$($p.Name)</td></tr>
+        <tr><th>Total RAM</th><td>$([math]::Round($c.TotalPhysicalMemory / 1GB, 2)) GB</td></tr>
+        <tr><th>Last Boot Time</th><td>$(Format-DFIRDate $o.LastBootUpTime)</td></tr>
+    </table>"
+}G-H "Services" { "<pre>$(Get-Service|? Status -eq 'Running'|Out-String)</pre>" }
 G-H "Processes" { "<pre>$(Get-Process|Sort CPU -D|Select -F 50|Out-String)</pre>" }
 G-H "Software" { (gp "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*","HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*"|? DisplayName|select DisplayName,DisplayVersion,Publisher,InstallDate|ConvertTo-Html -Fragment) }
 G-H "Netstat" { "<pre>$(netstat -ano|Out-String)</pre>" }
@@ -114,16 +125,37 @@ G-H "TypedPaths" {
 
 function G-E($n){ 
     G-H "Events_$n" { 
-        $ev = Get-EventLog -LogName $n -Newest 1000 -EA 0
+        # Optional: Increase -Newest 1000 to 5000 if you need to search further back
+        $ev = Get-EventLog -LogName $n -Newest 5000 -EA 0
         $res = $ev | % {
             $tGen = Format-DFIRDate $_.TimeGenerated
-            Add-TL -t $tGen -macb "M..." -a "EventLog-$n" -u "N/A" -d "ID: $($_.EventID) | $($_.Message)" -mod $tGen
-            [pscustomobject]@{ TimeGenerated=$tGen; EventID=$_.EventID; Message=$_.Message }
+            
+            # 1. Grab primary UserName property (populated in Application/System logs)
+            $uName = $_.UserName
+
+            # 2. Fallback: Parse Account/User Name from Security Log message text if blank
+            if ([string]::IsNullOrWhiteSpace($uName) -and $_.Message) {
+                if ($_.Message -match "(?i)(?:Account Name|User Name|SubjectUserName):\s*([^\s\r\n]+)") {
+                    $candidate = $matches[1].Trim()
+                    # Ignore null/anonymous indicators like '-'
+                    if ($candidate -and $candidate -ne "-") {
+                        $uName = $candidate
+                    }
+                }
+            }
+
+            # 3. Default to N/A if no user context was logged
+            if ([string]::IsNullOrWhiteSpace($uName)) { $uName = "N/A" }
+
+            # Push to Supertimeline CSV
+            Add-TL -t $tGen -macb "M..." -a "EventLog-$n" -u $uName -d "ID: $($_.EventID) | $($_.Message)" -mod $tGen
+            
+            # Push to HTML Report Table
+            [pscustomobject]@{ TimeGenerated=$tGen; EventID=$_.EventID; User=$uName; Message=$_.Message }
         }
         $res | ConvertTo-Html -Fragment 
     } 
-}
-G-E "Security"; G-E "System"; G-E "Application"
+}G-E "Security"; G-E "System"; G-E "Application"
 G-H "WifiPass" { $w=@(); netsh wlan show profiles|sls "All User Profile\s*:\s*(.+)"|%{$p=$_.Matches.Groups[1].Value.Trim();$k="N/A";netsh wlan show profile name="$p" key=clear|sls "Key Content\s*:\s*(.+)"|%{$k=$_.Matches.Groups[1].Value.Trim()};$w+=[pscustomobject]@{SSID=$p;Pass=$k}}; $w|ConvertTo-Html -Fragment }
 G-H "WMIPersistence" { "<pre>$(gcim -Namespace 'root\subscription' -ClassName __FilterToConsumerBinding -EA 0|Out-String)</pre>" }
 G-H "PSHistory" { 
@@ -148,7 +180,19 @@ G-H "BAM" {
     }}; $b | Sort ExecutionTime -D | ConvertTo-Html -Fragment 
 }
 G-H "Prefetch" { 
+    $pfState = (Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management\PrefetchParameters" -Name EnablePrefetcher -EA 0).EnablePrefetcher
+    
+    $headerMsg = ""
+    if ($null -eq $pfState -or $pfState -eq 0) {
+        $headerMsg = "<p style='color:#b30000;'><b>Note:</b> Windows Prefetch is disabled on this machine (EnablePrefetcher = 0). This is default behavior for Windows Server.</p>"
+    }
+
     $pf = Get-ChildItem C:\Windows\Prefetch\*.pf -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending
+    
+    if (-not $pf) {
+        return "$headerMsg<p>No .pf files found in C:\Windows\Prefetch\</p>"
+    }
+
     $sha256 = [System.Security.Cryptography.HashAlgorithm]::Create('SHA256')
 
     $res = $pf | ForEach-Object { 
@@ -174,7 +218,7 @@ G-H "Prefetch" {
             SHA256       = $hash
         }
     }
-    $res | ConvertTo-Html -Fragment 
+    "$headerMsg" + ($res | ConvertTo-Html -Fragment)
 }
 G-H "Profiles" { 
     $fDirs = dir C:\Users -Dir | % {
